@@ -1,8 +1,10 @@
 package handlers
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"digcatalog/internal/middleware"
@@ -408,6 +410,63 @@ func (h *Handler) DeleteFind(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "已删除"})
+}
+
+type batchStorageReq struct {
+	FindIDs    []uint `json:"findIds"`
+	StorageLoc string `json:"storageLoc"`
+}
+
+var errFindMissing = errors.New("部分文物不存在")
+
+func (h *Handler) BatchUpdateFindStorage(c *gin.Context) {
+	var req batchStorageReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "参数无效"})
+		return
+	}
+	if len(req.FindIDs) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请选择要修改的文物"})
+		return
+	}
+	loc := strings.TrimSpace(req.StorageLoc)
+	if loc == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "存放位置不能为空"})
+		return
+	}
+	seen := make(map[uint]struct{}, len(req.FindIDs))
+	ids := make([]uint, 0, len(req.FindIDs))
+	for _, id := range req.FindIDs {
+		if _, ok := seen[id]; !ok {
+			seen[id] = struct{}{}
+			ids = append(ids, id)
+		}
+	}
+	var updated int64
+	err := h.DB.Transaction(func(tx *gorm.DB) error {
+		var count int64
+		if err := tx.Model(&models.Find{}).Where("id IN ?", ids).Count(&count).Error; err != nil {
+			return err
+		}
+		if count != int64(len(ids)) {
+			return errFindMissing
+		}
+		res := tx.Model(&models.Find{}).Where("id IN ?", ids).Update("storage_loc", loc)
+		if res.Error != nil {
+			return res.Error
+		}
+		updated = res.RowsAffected
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, errFindMissing) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "部分文物不存在或已删除，本次批量修改已取消"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "批量修改失败"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"updated": updated})
 }
 
 // ---------- Overview ----------

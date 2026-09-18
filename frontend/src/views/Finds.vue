@@ -28,9 +28,28 @@
         </label>
       </div>
 
+      <div v-if="selected.size" class="batch-bar">
+        <span class="batch-info">已选 {{ selected.size }} 项</span>
+        <input
+          v-model="batchLoc"
+          class="batch-input"
+          placeholder="输入新的存放位置，如：库房A-3号柜"
+          @keyup.enter="applyBatch"
+        />
+        <button class="btn small" :disabled="batchSaving" @click="applyBatch">
+          {{ batchSaving ? '提交中…' : '批量修改存放位置' }}
+        </button>
+        <button class="btn secondary small" @click="clearSelection">清除选择</button>
+      </div>
+      <p v-if="batchError" class="error batch-msg">{{ batchError }}</p>
+      <p v-if="batchMsg" class="batch-ok batch-msg">{{ batchMsg }}</p>
+
       <table class="table">
         <thead>
           <tr>
+            <th class="check-col">
+              <input type="checkbox" :checked="allSelected" @change="toggleAll" />
+            </th>
             <th>登记号</th>
             <th>探方</th>
             <th>器物类型</th>
@@ -43,6 +62,9 @@
         </thead>
         <tbody>
           <tr v-for="item in list" :key="item.id">
+            <td class="check-col">
+              <input type="checkbox" :checked="selected.has(item.id)" @change="toggle(item.id)" />
+            </td>
             <td>{{ item.registerNo }}</td>
             <td>{{ item.unit?.code || '-' }}</td>
             <td><span class="tag">{{ item.artifactType }}</span></td>
@@ -123,7 +145,7 @@
 </template>
 
 <script setup>
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import api from '../api/http'
 
 const artifactTypes = ['陶片', '青铜器', '骨器', '玉器', '石器', '铁器', '其他']
@@ -135,6 +157,66 @@ const filterType = ref('')
 const error = ref('')
 const formError = ref('')
 const showModal = ref(false)
+
+const selected = reactive(new Set())
+const batchLoc = ref('')
+const batchError = ref('')
+const batchMsg = ref('')
+const batchSaving = ref(false)
+
+const allSelected = computed(
+  () => list.value.length > 0 && list.value.every((i) => selected.has(i.id))
+)
+
+function toggle(id) {
+  if (selected.has(id)) {
+    selected.delete(id)
+  } else {
+    selected.add(id)
+  }
+}
+
+function toggleAll() {
+  if (allSelected.value) {
+    list.value.forEach((i) => selected.delete(i.id))
+  } else {
+    list.value.forEach((i) => selected.add(i.id))
+  }
+}
+
+function clearSelection() {
+  selected.clear()
+  batchError.value = ''
+  batchMsg.value = ''
+}
+
+async function applyBatch() {
+  batchError.value = ''
+  batchMsg.value = ''
+  const loc = batchLoc.value.trim()
+  if (!loc) {
+    batchError.value = '请输入存放位置'
+    return
+  }
+  if (!selected.size) {
+    batchError.value = '请先勾选要修改的文物'
+    return
+  }
+  batchSaving.value = true
+  try {
+    const { data } = await api.post('/finds/batch-storage', {
+      findIds: [...selected],
+      storageLoc: loc
+    })
+    batchLoc.value = ''
+    await load()
+    batchMsg.value = `已更新 ${data.updated} 件文物的存放位置`
+  } catch (e) {
+    batchError.value = e.response?.data?.error || '批量修改失败，请稍后重试'
+  } finally {
+    batchSaving.value = false
+  }
+}
 
 const form = reactive({
   id: null,
@@ -161,6 +243,9 @@ async function loadMeta() {
 
 async function load() {
   error.value = ''
+  selected.clear()
+  batchError.value = ''
+  batchMsg.value = ''
   try {
     const params = {}
     if (filterUnitId.value) params.unitId = filterUnitId.value
@@ -255,5 +340,42 @@ onMounted(async () => {
 
 .filters label {
   min-width: 200px;
+}
+
+.batch-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  padding: 0.6rem 0.75rem;
+  margin-bottom: 0.75rem;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  background: #faf5ec;
+}
+
+.batch-info {
+  font-size: 0.9rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.batch-input {
+  flex: 1;
+  min-width: 220px;
+}
+
+.batch-msg {
+  margin: 0 0 0.75rem;
+}
+
+.batch-ok {
+  color: var(--ok);
+  font-size: 0.9rem;
+}
+
+.check-col {
+  width: 2.5rem;
+  text-align: center;
 }
 </style>

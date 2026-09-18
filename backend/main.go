@@ -84,6 +84,7 @@ func main() {
 			auth.GET("/finds", h.ListFinds)
 			auth.GET("/finds/:id", h.GetFind)
 			auth.POST("/finds", h.CreateFind)
+			auth.POST("/finds/batch-storage", h.BatchUpdateFindStorage)
 			auth.PUT("/finds/:id", h.UpdateFind)
 			auth.DELETE("/finds/:id", h.DeleteFind)
 		}

@@ -1,8 +1,10 @@
 package handlers
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"digcatalog/internal/middleware"
@@ -12,6 +14,8 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 )
+
+var errFindMissing = errors.New("部分文物不存在")
 
 type Handler struct {
 	DB        *gorm.DB
@@ -312,19 +316,46 @@ func parseDate(s *string) *time.Time {
 }
 
 func (h *Handler) ListFinds(c *gin.Context) {
-	var finds []models.Find
-	q := h.DB.Preload("Unit").Preload("Unit.Site").Preload("Material").Order("id desc")
-	if unitID := c.Query("unitId"); unitID != "" {
-		q = q.Where("unit_id = ?", unitID)
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	if page < 1 {
+		page = 1
 	}
-	if at := c.Query("artifactType"); at != "" {
-		q = q.Where("artifact_type = ?", at)
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("pageSize", "10"))
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 10
 	}
-	if err := q.Find(&finds).Error; err != nil {
+
+	applyFilters := func(db *gorm.DB) *gorm.DB {
+		if unitID := c.Query("unitId"); unitID != "" {
+			db = db.Where("unit_id = ?", unitID)
+		}
+		if at := c.Query("artifactType"); at != "" {
+			db = db.Where("artifact_type = ?", at)
+		}
+		return db
+	}
+
+	var total int64
+	if err := applyFilters(h.DB.Model(&models.Find{})).Count(&total).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, finds)
+
+	var finds []models.Find
+	if err := applyFilters(h.DB.Model(&models.Find{})).
+		Preload("Unit").Preload("Unit.Site").Preload("Material").
+		Order("id desc").
+		Offset((page - 1) * pageSize).Limit(pageSize).
+		Find(&finds).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"items":    finds,
+		"total":    total,
+		"page":     page,
+		"pageSize": pageSize,
+	})
 }
 
 func (h *Handler) GetFind(c *gin.Context) {
@@ -408,6 +439,62 @@ func (h *Handler) DeleteFind(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "已删除"})
+}
+
+type batchStorageReq struct {
+	FindIDs    []uint `json:"findIds"`
+	StorageLoc string `json:"storageLoc"`
+}
+
+// BatchStorage 在一个事务内把指定文物的存放位置统一更新。
+// 任一 id 不存在（或已软删除）则整批回滚。
+func (h *Handler) BatchStorage(c *gin.Context) {
+	var req batchStorageReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "参数无效"})
+		return
+	}
+	if len(req.FindIDs) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请至少选择一件文物"})
+		return
+	}
+	if strings.TrimSpace(req.StorageLoc) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "存放位置不能为空"})
+		return
+	}
+
+	// 去掉重复 id，避免数量校验被重复元素干扰
+	seen := make(map[uint]struct{}, len(req.FindIDs))
+	ids := make([]uint, 0, len(req.FindIDs))
+	for _, id := range req.FindIDs {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+
+	err := h.DB.Transaction(func(tx *gorm.DB) error {
+		var count int64
+		if err := tx.Model(&models.Find{}).Where("id IN ?", ids).Count(&count).Error; err != nil {
+			return err
+		}
+		// 命中数量与去重后 id 数量不一致，说明有 id 不存在 -> 整批回滚
+		if int(count) != len(ids) {
+			return errFindMissing
+		}
+		return tx.Model(&models.Find{}).Where("id IN ?", ids).
+			Update("storage_loc", req.StorageLoc).Error
+	})
+	if err != nil {
+		if errors.Is(err, errFindMissing) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "部分文物不存在或已被删除，未做任何修改"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"updated": len(ids)})
 }
 
 // ---------- Overview ----------
